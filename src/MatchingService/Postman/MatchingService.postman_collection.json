@@ -161,7 +161,7 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.collectionVariables.set('tripId', pm.variables.replaceIn('{{$guid}}'));"
+                  "pm.collectionVariables.set('tripId');"
                 ]
               }
             },

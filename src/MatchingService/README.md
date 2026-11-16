@@ -23,26 +23,69 @@ Cấu trúc chính của MatchingService:
 
 ```text
 MatchingService/
-├── MatchingService.Api/
-│   ├── Controllers/
-│   ├── Program.cs
-│   ├── appsettings.json
-│   ├── appsettings.Development.json
-│   └── MatchingService.Api.csproj
-├── MatchingService.Application/
-│   ├── DTOs/
-│   ├── Interfaces/
-│   └── Services/
-├── MatchingService.Domain/
-│   ├── Entities/
-│   └── ValueObjects/
-└── MatchingService.Infrastructure/
-    ├── Integration/
-    │   ├── RabbitMqIntegration.cs
-    │   ├── TripPricingConsumer.cs
-    │   └── RabbitMqIntegrationEventPublisher.cs
-    ├── Persistence/
-    └── Migrations/
+│
+├── MatchingService.Api/                         # Presentation Layer: Tiếp nhận HTTP Request và trả Response
+│   │
+│   ├── Controllers/                              # Các Controller tiếp nhận và xử lý API
+│   │   ├── DriverController.cs                   # API quản lý tài xế
+│   │   └── MatchingController.cs                 # API quản lý yêu cầu ghép tài xế
+│   │
+│   ├── Program.cs                                # Cấu hình DI, đăng ký service, middleware và khởi chạy ứng dụng
+│   ├── appsettings.json                          # Cấu hình ứng dụng mặc định
+│   ├── appsettings.Development.json              # Cấu hình khi chạy môi trường Development
+│   └── MatchingService.Api.csproj                # File cấu hình và khai báo dependencies của API
+│
+├── MatchingService.Application/                  # Application Layer: Điều phối các nghiệp vụ của ứng dụng
+│   │
+│   ├── DTOs/                                     # Các đối tượng truyền dữ liệu giữa API và Application
+│   │   ├── CreateMatchingRequest.cs              # Dữ liệu đầu vào khi tạo yêu cầu Matching
+│   │   ├── MatchingResponse.cs                   # Dữ liệu kết quả Matching trả về
+│   │   ├── PricingRequest.cs                      # Dữ liệu đầu vào khi tính giá chuyến đi
+│   │   └── PricingResponse.cs                     # Kết quả tính giá chuyến đi
+│   │
+│   ├── Interfaces/                               # Định nghĩa các interface mà Application cần sử dụng
+│   │   ├── IDriverService.cs                     # Interface xử lý nghiệp vụ tài xế
+│   │   ├── IMatchingService.cs                   # Interface xử lý nghiệp vụ Matching
+│   │   ├── IPricingService.cs                    # Interface xử lý nghiệp vụ tính giá
+│   │   ├── IDriverRepository.cs                  # Interface truy cập dữ liệu tài xế
+│   │   ├── IMatchingRepository.cs                # Interface truy cập dữ liệu Matching
+│   │   ├── IUnitOfWork.cs                        # Interface quản lý việc lưu các thay đổi dữ liệu
+│   │   └── IIntegrationEventPublisher.cs         # Interface phát Integration Event
+│   │
+│   ├── Services/                                 # Triển khai các use case và điều phối nghiệp vụ
+│   │   ├── DriverService.cs                      # Xử lý tạo, cập nhật và truy vấn tài xế
+│   │   ├── MatchingService.cs                    # Xử lý tạo Matching, tìm tài xế và Accept/Reject
+│   │   └── PricingService.cs                     # Tính giá dựa trên thông tin tuyến đường và pricing strategy
+│   │
+│   └── MatchingService.Application.csproj        # File cấu hình project Application
+│
+├── MatchingService.Domain/                       # Domain Layer: Chứa mô hình và quy tắc nghiệp vụ cốt lõi
+│   │
+│   ├── Entities/                                 # Các Entity đại diện cho đối tượng nghiệp vụ
+│   │   ├── Driver.cs                              # Thông tin và trạng thái tài xế
+│   │   ├── MatchingRequest.cs                     # Yêu cầu ghép tài xế với chuyến đi
+│   │   └── MatchingAttempt.cs                     # Lịch sử các lượt đề xuất tài xế
+│   │
+│   ├── ValueObjects/                             # Các Value Object biểu diễn giá trị nghiệp vụ
+│   │   └── Location.cs                            # Tọa độ vị trí gồm Latitude và Longitude
+│   │
+│   └── MatchingService.Domain.csproj              # File cấu hình project Domain
+│
+└── MatchingService.Infrastructure/                # Infrastructure Layer: Triển khai cơ sở dữ liệu và tích hợp hệ thống
+    │
+    ├── Integration/                               # Tích hợp RabbitMQ và các hệ thống bên ngoài
+    │   ├── RabbitMqIntegration.cs                 # Cấu hình kết nối RabbitMQ, Envelope, Payload và TripCreatedConsumer
+    │   ├── TripPricingConsumer.cs                 # Nhận TripCreated để xử lý tính giá chuyến đi
+    │   └── RabbitMqIntegrationEventPublisher.cs   # Publish sự kiện DriverAssigned lên RabbitMQ
+    │
+    ├── Persistence/                               # Triển khai truy cập và lưu trữ dữ liệu
+    │   ├── Repositories/                          # Cài đặt các Repository Interface bằng EF Core
+    │   ├── MatchingDbContext.cs                   # DbContext quản lý các Entity và bảng trong MySQL
+    │   └── UnitOfWork.cs                          # Triển khai UnitOfWork để lưu thay đổi dữ liệu
+    │
+    ├── Migrations/                                # Các migration quản lý thay đổi cấu trúc database
+    │
+    └── MatchingService.Infrastructure.csproj      # File cấu hình project Infrastructure
 ```
 
 Vai trò các layer:

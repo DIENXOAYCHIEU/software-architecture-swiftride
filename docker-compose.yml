@@ -72,6 +72,8 @@ services:
 
     networks:
       - swiftride-network
+    
+    restart: unless-stopped
 
 networks:
   swiftride-network:
