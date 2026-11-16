@@ -120,6 +120,8 @@ public sealed class TripPaymentConsumer(
         channel.QueueBind(options.Queue, options.Exchange, "PaymentSettled");
         channel.QueueBind(options.Queue, options.Exchange, "PaymentFailed");
         channel.QueueBind(options.Queue, options.Exchange, "PaymentRefunded");
+        channel.QueueBind(options.Queue, options.Exchange, "DriverAssigned");
+        channel.QueueBind(options.Queue, options.Exchange, "PriceCalculated");
         var consumer = new AsyncEventingBasicConsumer(channel);
         consumer.Received += async (_, args) =>
         {
@@ -136,14 +138,35 @@ public sealed class TripPaymentConsumer(
                     channel.BasicAck(args.DeliveryTag, false);
                     return;
                 }
-                var payment = JsonSerializer.Deserialize<PaymentEvent>(envelope.Payload)
-                    ?? throw new InvalidOperationException("Invalid payment payload.");
-                var trip = await db.Trips.FirstOrDefaultAsync(
-                    x => x.Id == payment.TripId, stoppingToken)
-                    ?? throw new InvalidOperationException("Trip for payment event was not found.");
-                if (envelope.EventName == "PaymentSettled") trip.MarkPaid();
-                else if (envelope.EventName == "PaymentFailed") trip.MarkPaymentPending();
-                else if (envelope.EventName == "PaymentRefunded") trip.Cancel();
+                if (envelope.EventName == "DriverAssigned")
+                {
+                    var e = JsonSerializer.Deserialize<DriverAssignedEvent>(envelope.Payload)
+                        ?? throw new InvalidOperationException("Invalid DriverAssigned payload.");
+                    var trip = await db.Trips.FirstOrDefaultAsync(
+                        x => x.Id == e.TripId, stoppingToken)
+                        ?? throw new InvalidOperationException("Trip not found.");
+                    if (trip.DriverId != e.DriverId) trip.AssignDriver(e.DriverId);
+                }
+                else if (envelope.EventName == "PriceCalculated")
+                {
+                    var e = JsonSerializer.Deserialize<PriceCalculatedEvent>(envelope.Payload)
+                        ?? throw new InvalidOperationException("Invalid PriceCalculated payload.");
+                    var trip = await db.Trips.FirstOrDefaultAsync(
+                        x => x.Id == e.TripId, stoppingToken)
+                        ?? throw new InvalidOperationException("Trip not found.");
+                    trip.AmountToPay = e.FinalPrice;
+                }
+                else
+                {
+                    var payment = JsonSerializer.Deserialize<PaymentEvent>(envelope.Payload)
+                        ?? throw new InvalidOperationException("Invalid payment payload.");
+                    var trip = await db.Trips.FirstOrDefaultAsync(
+                        x => x.Id == payment.TripId, stoppingToken)
+                        ?? throw new InvalidOperationException("Trip for payment event was not found.");
+                    if (envelope.EventName == "PaymentSettled") trip.MarkPaid();
+                    else if (envelope.EventName == "PaymentFailed") trip.MarkPaymentPending();
+                    else if (envelope.EventName == "PaymentRefunded") trip.Cancel();
+                }
                 db.ProcessedIntegrationMessages.Add(new ProcessedIntegrationMessage
                 {
                     MessageId = envelope.MessageId
@@ -163,6 +186,8 @@ public sealed class TripPaymentConsumer(
 
     private sealed record Envelope(string MessageId, string EventName, string Payload);
     private sealed record PaymentEvent(Guid PaymentId, Guid TripId, decimal Amount);
+    private sealed record DriverAssignedEvent(Guid TripId, Guid DriverId);
+    private sealed record PriceCalculatedEvent(Guid TripId, decimal FinalPrice);
 }
 
 public static class IntegrationRegistration

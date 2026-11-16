@@ -33,6 +33,13 @@ public class TripService : ITripService{
 			);
 
 		await _tripRepository.AddAsync(trip);
+		await _events.PublishAsync("TripCreated", new {
+			TripId = trip.Id,
+			PickupLatitude = trip.StartLocation.Latitude,
+			PickupLongitude = trip.StartLocation.Longitude,
+			DropoffLatitude = trip.EndLocation.Latitude,
+			DropoffLongitude = trip.EndLocation.Longitude
+		});
 		await _unitOfWork.SaveChangesAsync();
 
 		return new CreatedTripResponse(

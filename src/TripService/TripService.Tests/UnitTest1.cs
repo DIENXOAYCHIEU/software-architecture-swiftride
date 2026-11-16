@@ -14,6 +14,7 @@ public class TripServiceTests
 {
     private readonly Mock<ITripRepository> _tripRepository = new();
     private readonly Mock<IUnitOfWork> _unitOfWork = new();
+    private readonly Mock<ITripEventPublisher> _events = new();
     private readonly TripService.Application.Services.TripService _service;
 
     private readonly Guid _riderId =
@@ -34,7 +35,8 @@ public class TripServiceTests
 
         _service = new TripService.Application.Services.TripService(
             _tripRepository.Object,
-            _unitOfWork.Object
+            _unitOfWork.Object,
+            _events.Object
         );
     }
 
@@ -68,6 +70,13 @@ public class TripServiceTests
             x => x.AddAsync(It.Is<Trip>(trip =>
                 trip.RiderId == _riderId &&
                 trip.Status == TripStatus.REQUESTED)),
+            Times.Once);
+
+        _events.Verify(
+            x => x.PublishAsync(
+                "TripCreated",
+                It.IsAny<object>(),
+                It.IsAny<CancellationToken>()),
             Times.Once);
 
         _unitOfWork.Verify(
