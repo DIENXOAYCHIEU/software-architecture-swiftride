@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
 using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using PaymentService.Application;
 using PaymentService.Infrastructure;
@@ -10,8 +11,11 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.ConfigureHttpJsonOptions(o =>
     o.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
+// Gộp chung Metrics (Prometheus) và Tracing (Jaeger OTLP) vào 1 lần gọi AddOpenTelemetry duy nhất
+var serviceName = "PaymentService";
 builder.Services.AddMetrics();
 builder.Services.AddOpenTelemetry()
+    .ConfigureResource(resource => resource.AddService(serviceName))
     .WithMetrics(metrics => metrics
         .AddAspNetCoreInstrumentation()
         .AddRuntimeInstrumentation()
@@ -19,7 +23,14 @@ builder.Services.AddOpenTelemetry()
         .AddPrometheusExporter())
     .WithTracing(tracing => tracing
         .AddAspNetCoreInstrumentation()
-        .AddSource("SwiftRide.PaymentService"));
+        .AddHttpClientInstrumentation()
+        .AddSource("SwiftRide.PaymentService")
+        .AddSource("SwiftRide.Messaging")
+        .AddOtlpExporter(opt =>
+        {
+            opt.Endpoint = new Uri(builder.Configuration["Otel:Endpoint"] ?? "http://jaeger:4317");
+        }));
+
 builder.Services.AddHealthChecks();
 
 builder.Services

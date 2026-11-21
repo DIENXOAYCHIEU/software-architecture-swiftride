@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -6,7 +7,6 @@ using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using TripService.Application.Interfaces;
-using TripService.Domain.Enums;
 using TripService.Infrastructure.Persistence;
 
 namespace TripService.Infrastructure.Integration;
@@ -42,9 +42,12 @@ public sealed class RabbitMqConnection(RabbitMqOptions options) : IDisposable
 {
     private readonly IConnection connection = new ConnectionFactory
     {
-        HostName = options.Host, Port = options.Port,
-        UserName = options.UserName, Password = options.Password,
-        DispatchConsumersAsync = true
+        HostName = options.Host,
+        Port = options.Port,
+        UserName = options.UserName,
+        Password = options.Password,
+        DispatchConsumersAsync = true,
+        AutomaticRecoveryEnabled = true
     }.CreateConnection();
 
     public IModel CreateChannel() => connection.CreateModel();
@@ -65,7 +68,9 @@ public sealed class TripEventPublisher(TripDbContext db) : ITripEventPublisher
 }
 
 public sealed class TripOutboxWorker(
-    IServiceScopeFactory scopes, RabbitMqConnection rabbit, RabbitMqOptions options,
+    IServiceScopeFactory scopes,
+    RabbitMqConnection rabbit,
+    RabbitMqOptions options,
     ILogger<TripOutboxWorker> log) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -76,34 +81,62 @@ public sealed class TripOutboxWorker(
             {
                 using var scope = scopes.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<TripDbContext>();
-                var messages = await db.OutboxMessages.Where(x => x.PublishedAtUtc == null)
-                    .OrderBy(x => x.OccurredAtUtc).Take(20).ToListAsync(stoppingToken);
-                using var channel = rabbit.CreateChannel();
-                channel.ExchangeDeclare(options.Exchange, ExchangeType.Topic, durable: true);
-                foreach (var message in messages)
+                var messages = await db.OutboxMessages
+                    .Where(x => x.PublishedAtUtc == null)
+                    .OrderBy(x => x.OccurredAtUtc)
+                    .Take(20)
+                    .ToListAsync(stoppingToken);
+
+                if (messages.Count > 0)
                 {
-                    var body = JsonSerializer.Serialize(new
+                    using var channel = rabbit.CreateChannel();
+                    channel.ExchangeDeclare(options.Exchange, ExchangeType.Topic, durable: true);
+
+                    var props = channel.CreateBasicProperties();
+                    props.Persistent = true;
+
+                    foreach (var message in messages)
                     {
-                        MessageId = message.Id,
-                        message.EventName,
-                        message.Payload
-                    });
-                    channel.BasicPublish(options.Exchange, message.EventName, null,
-                        System.Text.Encoding.UTF8.GetBytes(body));
-                    message.PublishedAtUtc = DateTime.UtcNow;
+                        var body = JsonSerializer.Serialize(new
+                        {
+                            MessageId = message.Id.ToString(),
+                            message.EventName,
+                            message.Payload
+                        });
+
+                        channel.BasicPublish(
+                            options.Exchange,
+                            message.EventName,
+                            props,
+                            Encoding.UTF8.GetBytes(body));
+
+                        message.PublishedAtUtc = DateTime.UtcNow;
+                    }
+
+                    await db.SaveChangesAsync(stoppingToken);
                 }
-                await db.SaveChangesAsync(stoppingToken);
             }
-            catch (Exception ex) { log.LogError(ex, "Trip outbox iteration failed"); }
+            catch (Exception ex)
+            {
+                log.LogError(ex, "Trip outbox iteration failed");
+            }
+
             await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
         }
     }
 }
 
 public sealed class TripPaymentConsumer(
-    IServiceScopeFactory scopes, RabbitMqConnection rabbit, RabbitMqOptions options,
+    IServiceScopeFactory scopes,
+    RabbitMqConnection rabbit,
+    RabbitMqOptions options,
     ILogger<TripPaymentConsumer> log) : BackgroundService
 {
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
+
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var channel = rabbit.CreateChannel();
@@ -111,57 +144,90 @@ public sealed class TripPaymentConsumer(
         channel.ExchangeDeclare(options.DeadLetterExchange, ExchangeType.Topic, durable: true);
         channel.QueueDeclare(options.DeadLetterQueue, durable: true, exclusive: false, autoDelete: false);
         channel.QueueBind(options.DeadLetterQueue, options.DeadLetterExchange, "#");
+
         var queueArguments = new Dictionary<string, object>
         {
             ["x-dead-letter-exchange"] = options.DeadLetterExchange,
             ["x-dead-letter-routing-key"] = options.DeadLetterQueue
         };
+
         channel.QueueDeclare(options.Queue, durable: true, exclusive: false, autoDelete: false, queueArguments);
+
+        // Đăng ký nhận event từ MatchingService
+        channel.QueueBind(options.Queue, options.Exchange, "DriverAssigned");
+
+        // Đăng ký nhận event từ PaymentService
         channel.QueueBind(options.Queue, options.Exchange, "PaymentSettled");
         channel.QueueBind(options.Queue, options.Exchange, "PaymentFailed");
         channel.QueueBind(options.Queue, options.Exchange, "PaymentRefunded");
+
         var consumer = new AsyncEventingBasicConsumer(channel);
         consumer.Received += async (_, args) =>
         {
             try
             {
                 var envelope = JsonSerializer.Deserialize<Envelope>(
-                    System.Text.Encoding.UTF8.GetString(args.Body.ToArray()))
-                    ?? throw new InvalidOperationException("Invalid payment event.");
+                    Encoding.UTF8.GetString(args.Body.ToArray()), JsonOptions)
+                    ?? throw new InvalidOperationException("Invalid integration envelope.");
+
                 using var scope = scopes.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<TripDbContext>();
+
+                // Chống xử lý trùng message (Idempotency)
                 if (await db.ProcessedIntegrationMessages.AnyAsync(
                         x => x.MessageId == envelope.MessageId, stoppingToken))
                 {
                     channel.BasicAck(args.DeliveryTag, false);
                     return;
                 }
-                var payment = JsonSerializer.Deserialize<PaymentEvent>(envelope.Payload)
-                    ?? throw new InvalidOperationException("Invalid payment payload.");
-                var trip = await db.Trips.FirstOrDefaultAsync(
-                    x => x.Id == payment.TripId, stoppingToken)
-                    ?? throw new InvalidOperationException("Trip for payment event was not found.");
-                if (envelope.EventName == "PaymentSettled") trip.MarkPaid();
-                else if (envelope.EventName == "PaymentFailed") trip.MarkPaymentPending();
-                else if (envelope.EventName == "PaymentRefunded") trip.Cancel();
+
+                if (envelope.EventName == "DriverAssigned")
+                {
+                    var assigned = JsonSerializer.Deserialize<DriverAssignedEvent>(envelope.Payload, JsonOptions)
+                        ?? throw new InvalidOperationException("Invalid DriverAssigned payload.");
+
+                    var trip = await db.Trips.FirstOrDefaultAsync(
+                        x => x.Id == assigned.TripId, stoppingToken)
+                        ?? throw new InvalidOperationException("Trip for DriverAssigned event was not found.");
+
+                    trip.AssignDriver(assigned.DriverId);
+                    log.LogInformation("[RabbitMQ] Đã gán DriverId {DriverId} cho TripId {TripId}", assigned.DriverId, assigned.TripId);
+                }
+                else
+                {
+                    var payment = JsonSerializer.Deserialize<PaymentEvent>(envelope.Payload, JsonOptions)
+                        ?? throw new InvalidOperationException("Invalid payment payload.");
+
+                    var trip = await db.Trips.FirstOrDefaultAsync(
+                        x => x.Id == payment.TripId, stoppingToken)
+                        ?? throw new InvalidOperationException("Trip for payment event was not found.");
+
+                    if (envelope.EventName == "PaymentSettled") trip.MarkPaid();
+                    else if (envelope.EventName == "PaymentFailed") trip.MarkPaymentPending();
+                    else if (envelope.EventName == "PaymentRefunded") trip.Cancel();
+                }
+
                 db.ProcessedIntegrationMessages.Add(new ProcessedIntegrationMessage
                 {
                     MessageId = envelope.MessageId
                 });
+
                 await db.SaveChangesAsync(stoppingToken);
                 channel.BasicAck(args.DeliveryTag, false);
             }
             catch (Exception ex)
             {
-                log.LogError(ex, "Trip payment event failed");
+                log.LogError(ex, "Trip integration event failed");
                 channel.BasicNack(args.DeliveryTag, false, false);
             }
         };
+
         channel.BasicConsume(options.Queue, false, consumer);
         return Task.CompletedTask;
     }
 
     private sealed record Envelope(string MessageId, string EventName, string Payload);
+    private sealed record DriverAssignedEvent(Guid TripId, Guid DriverId);
     private sealed record PaymentEvent(Guid PaymentId, Guid TripId, decimal Amount);
 }
 
