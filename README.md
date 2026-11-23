@@ -136,3 +136,10 @@ docker compose up
 - [PaymentService README](./src/PaymentService/README.md)
 - [PaymentService Postman Collection](./src/PaymentService/Postman/PaymentService.postman_collection.json)
 
+
+# Hướng Dẫn Giám Sát & Kiểm Tra Hệ Thống SwiftRide (RabbitMQ, OpenTelemetry, Docker)
+
+## Quan Sát Tin Nhắn Qua RabbitMQ Management (`http://localhost:15672`)
+
+
+## Quan Sát Hiệu Năng & Truy Vết Bằng OpenTelemetry (Jaeger) (`http://localhost:16686`)

@@ -5,6 +5,8 @@ using MatchingService.Infrastructure;
 using MatchingService.Infrastructure.Persistence;
 using MatchingService.Application.Strategies;
 using MatchingService.Infrastructure.Integration;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 
 using MatchingAppService = MatchingService.Application.Services.MatchingService;
 
@@ -19,17 +21,29 @@ builder.Services.AddSwaggerGen();
 builder.Services.AddScoped<IDriverService, DriverService>();
 builder.Services.AddScoped<IMatchingService, MatchingAppService>();
 builder.Services.AddScoped<IPricingService, PricingService>();
-builder.Services.AddScoped<IPricingStrategy,NormalPricingStrategy>();
+builder.Services.AddScoped<IPricingStrategy, NormalPricingStrategy>();
 
 // Infrastructure
-builder.Services.AddInfrastructureServices(
-    builder.Configuration);
+builder.Services.AddInfrastructureServices(builder.Configuration);
 
 var rabbitOptions =
     builder.Configuration.GetSection("RabbitMq")
         .Get<RabbitMqOptions>() ?? new RabbitMqOptions();
 
 builder.Services.AddMatchingInfrastructureIntegration(rabbitOptions);
+
+// PHẢI ĐẶT TRƯỚC builder.Build()
+var serviceName = "MatchingService";
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(resource => resource.AddService(serviceName))
+    .WithTracing(tracing => tracing
+        .AddAspNetCoreInstrumentation()
+        .AddHttpClientInstrumentation()
+        .AddSource("SwiftRide.Messaging")
+        .AddOtlpExporter(opt =>
+        {
+            opt.Endpoint = new Uri(builder.Configuration["Otel:Endpoint"] ?? "http://jaeger:4317");
+        }));
 
 var app = builder.Build();
 
@@ -47,7 +61,6 @@ if (builder.Configuration.GetValue<bool>("UseHttpsRedirection"))
 app.UseAuthorization();
 
 app.MapControllers();
-
 
 using (var scope = app.Services.CreateScope())
 {

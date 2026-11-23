@@ -1,4 +1,15 @@
 services:
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: swiftride_jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" #ui
+      - "4317:4317" #otlp
+    networks:
+      - swiftride-network
+
   rabbitmq:
     image: rabbitmq:3-management
     container_name: swiftride_rabbitmq
@@ -37,6 +48,8 @@ services:
         condition: service_started
       trip_service:
         condition: service_started
+      matching_service:
+        condition: service_started
       payment_service:
         condition: service_started
     networks:
@@ -67,6 +80,7 @@ services:
       context: .
       dockerfile: src/TripService/TripService.Api/Dockerfile
     environment:
+      Otel__Endpoint: http://jaeger:4317
       ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_URLS: http://+:8082
       ConnectionStrings__TripServiceDb: ${TRIP_DB_CONNECTION}
@@ -89,6 +103,7 @@ services:
       dockerfile: src/MatchingService/MatchingService.Api/Dockerfile
     container_name: matching_service
     environment:
+      Otel__Endpoint: http://jaeger:4317
       ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_URLS: http://+:8083
       ConnectionStrings__MatchingServiceDb: ${MATCHING_DB_CONNECTION}
@@ -110,6 +125,7 @@ services:
       context: .
       dockerfile: src/PaymentService/PaymentService.Api/Dockerfile
     environment:
+      Otel__Endpoint: http://jaeger:4317
       ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_URLS: http://+:8084
       ConnectionStrings__PaymentServiceDb: ${PAYMENT_DB_CONNECTION}

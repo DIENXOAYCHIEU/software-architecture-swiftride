@@ -161,7 +161,9 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.collectionVariables.set('tripId', pm.variables.replaceIn('{{$guid}}'));"
+                  "// Neu da Create Trip thi dung trip_id that; neu khong thi sinh GUID ngau nhien (test doc lap)",
+                  "const real = pm.globals.get('trip_id');",
+                  "pm.collectionVariables.set('tripId', real || pm.variables.replaceIn('{{$guid}}'));"
                 ]
               }
             },
@@ -253,7 +255,31 @@
               ]
             }
           },
-          "response": []
+          "response": [],
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const real = pm.globals.get('trip_id');",
+                  "if (real) { pm.collectionVariables.set('tripId', real); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const data = pm.response.json();",
+                  "if (data.matchingId) { pm.collectionVariables.set('matchingId', data.matchingId); }",
+                  "if (data.driverId) { pm.collectionVariables.set('offeredDriverId', data.driverId); }",
+                  "pm.test('Matching cho trip: ' + data.status, () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "Start Matching",
@@ -330,7 +356,21 @@
             },
             "description": "Accepts the currently offered driver, changes the matching status to Matched, and publishes DriverAssigned."
           },
-          "response": []
+          "response": [],
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Neu chua co tai xe duoc de xuat thi dung tai xe vua tao (truong hop chi co 1 tai xe)",
+                  "if (!pm.collectionVariables.get('offeredDriverId')) {",
+                  "  pm.collectionVariables.set('offeredDriverId', pm.collectionVariables.get('driverId'));",
+                  "}"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "Reject Offered Driver",

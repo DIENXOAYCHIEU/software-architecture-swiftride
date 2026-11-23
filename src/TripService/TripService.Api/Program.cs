@@ -1,11 +1,11 @@
 ﻿using Microsoft.EntityFrameworkCore;
-
-using TripService.Infrastructure.Persistence;
-using TripService.Infrastructure.Persistence.Repositories;
-
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 using TripService.Application.Interfaces;
 using TripService.Application.Services;
 using TripService.Infrastructure.Integration;
+using TripService.Infrastructure.Persistence;
+using TripService.Infrastructure.Persistence.Repositories;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -25,6 +25,19 @@ builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 builder.Services.AddScoped<ITripService, TripService.Application.Services.TripService>();
 builder.Services.AddInfrastructureIntegration(builder.Configuration.GetSection("RabbitMq").Get<TripService.Infrastructure.Integration.RabbitMqOptions>()
     ?? new TripService.Infrastructure.Integration.RabbitMqOptions());
+
+// PHẢI ĐẶT TRƯỚC builder.Build()
+var serviceName = "TripService";
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(resource => resource.AddService(serviceName))
+    .WithTracing(tracing => tracing
+        .AddAspNetCoreInstrumentation()
+        .AddHttpClientInstrumentation()
+        .AddSource("SwiftRide.Messaging")
+        .AddOtlpExporter(opt =>
+        {
+            opt.Endpoint = new Uri(builder.Configuration["Otel:Endpoint"] ?? "http://jaeger:4317");
+        }));
 
 var app = builder.Build();
 
