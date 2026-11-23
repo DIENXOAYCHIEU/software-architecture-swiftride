@@ -37,7 +37,15 @@ public class TripService : ITripService
             DateTime.UtcNow
         );
 
-        await _tripRepository.AddAsync(trip);
+		await _tripRepository.AddAsync(trip);
+		await _events.PublishAsync("TripCreated", new {
+			TripId = trip.Id,
+			PickupLatitude = trip.StartLocation.Latitude,
+			PickupLongitude = trip.StartLocation.Longitude,
+			DropoffLatitude = trip.EndLocation.Latitude,
+			DropoffLongitude = trip.EndLocation.Longitude
+		});
+		await _unitOfWork.SaveChangesAsync();
 
         // Bắn payload khớp 100% với TripCreatedPayload bên MatchingService
         await _events.PublishAsync("TripCreated", new

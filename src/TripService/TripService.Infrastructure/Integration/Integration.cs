@@ -137,13 +137,15 @@ public sealed class TripPaymentConsumer(
         PropertyNameCaseInsensitive = true
     };
 
+    private IModel? _channel;
+
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var channel = rabbit.CreateChannel();
-        channel.ExchangeDeclare(options.Exchange, ExchangeType.Topic, durable: true);
-        channel.ExchangeDeclare(options.DeadLetterExchange, ExchangeType.Topic, durable: true);
-        channel.QueueDeclare(options.DeadLetterQueue, durable: true, exclusive: false, autoDelete: false);
-        channel.QueueBind(options.DeadLetterQueue, options.DeadLetterExchange, "#");
+        _channel = rabbit.CreateChannel();
+        _channel.ExchangeDeclare(options.Exchange, ExchangeType.Topic, durable: true);
+        _channel.ExchangeDeclare(options.DeadLetterExchange, ExchangeType.Topic, durable: true);
+        _channel.QueueDeclare(options.DeadLetterQueue, durable: true, exclusive: false, autoDelete: false);
+        _channel.QueueBind(options.DeadLetterQueue, options.DeadLetterExchange, "#");
 
         var queueArguments = new Dictionary<string, object>
         {
@@ -151,17 +153,21 @@ public sealed class TripPaymentConsumer(
             ["x-dead-letter-routing-key"] = options.DeadLetterQueue
         };
 
-        channel.QueueDeclare(options.Queue, durable: true, exclusive: false, autoDelete: false, queueArguments);
+        _channel.QueueDeclare(options.Queue, durable: true, exclusive: false, autoDelete: false, queueArguments);
 
-        // Đăng ký nhận event từ MatchingService
-        channel.QueueBind(options.Queue, options.Exchange, "DriverAssigned");
+        // Giới hạn xử lý 1 message tại 1 thời điểm để đảm bảo an toàn thread cho channel
+        _channel.BasicQos(prefetchSize: 0, prefetchCount: 1, global: false);
+
+        // Đăng ký nhận event từ MatchingService & PricingService
+        _channel.QueueBind(options.Queue, options.Exchange, "DriverAssigned");
+        _channel.QueueBind(options.Queue, options.Exchange, "PriceCalculated");
 
         // Đăng ký nhận event từ PaymentService
-        channel.QueueBind(options.Queue, options.Exchange, "PaymentSettled");
-        channel.QueueBind(options.Queue, options.Exchange, "PaymentFailed");
-        channel.QueueBind(options.Queue, options.Exchange, "PaymentRefunded");
+        _channel.QueueBind(options.Queue, options.Exchange, "PaymentSettled");
+        _channel.QueueBind(options.Queue, options.Exchange, "PaymentFailed");
+        _channel.QueueBind(options.Queue, options.Exchange, "PaymentRefunded");
 
-        var consumer = new AsyncEventingBasicConsumer(channel);
+        var consumer = new AsyncEventingBasicConsumer(_channel);
         consumer.Received += async (_, args) =>
         {
             try
@@ -177,27 +183,34 @@ public sealed class TripPaymentConsumer(
                 if (await db.ProcessedIntegrationMessages.AnyAsync(
                         x => x.MessageId == envelope.MessageId, stoppingToken))
                 {
-                    channel.BasicAck(args.DeliveryTag, false);
+                    _channel.BasicAck(args.DeliveryTag, false);
                     return;
                 }
 
                 if (envelope.EventName == "DriverAssigned")
                 {
-                    var assigned = JsonSerializer.Deserialize<DriverAssignedEvent>(envelope.Payload, JsonOptions)
+                    var e = JsonSerializer.Deserialize<DriverAssignedEvent>(envelope.Payload, JsonOptions)
                         ?? throw new InvalidOperationException("Invalid DriverAssigned payload.");
-
                     var trip = await db.Trips.FirstOrDefaultAsync(
-                        x => x.Id == assigned.TripId, stoppingToken)
-                        ?? throw new InvalidOperationException("Trip for DriverAssigned event was not found.");
+                        x => x.Id == e.TripId, stoppingToken)
+                        ?? throw new InvalidOperationException("Trip not found.");
 
-                    trip.AssignDriver(assigned.DriverId);
-                    log.LogInformation("[RabbitMQ] Đã gán DriverId {DriverId} cho TripId {TripId}", assigned.DriverId, assigned.TripId);
+                    if (trip.DriverId != e.DriverId) trip.AssignDriver(e.DriverId);
                 }
-                else
+                else if (envelope.EventName == "PriceCalculated")
+                {
+                    var e = JsonSerializer.Deserialize<PriceCalculatedEvent>(envelope.Payload, JsonOptions)
+                        ?? throw new InvalidOperationException("Invalid PriceCalculated payload.");
+                    var trip = await db.Trips.FirstOrDefaultAsync(
+                        x => x.Id == e.TripId, stoppingToken)
+                        ?? throw new InvalidOperationException("Trip not found.");
+
+                    trip.AmountToPay = e.FinalPrice;
+                }
+                else if (envelope.EventName is "PaymentSettled" or "PaymentFailed" or "PaymentRefunded")
                 {
                     var payment = JsonSerializer.Deserialize<PaymentEvent>(envelope.Payload, JsonOptions)
                         ?? throw new InvalidOperationException("Invalid payment payload.");
-
                     var trip = await db.Trips.FirstOrDefaultAsync(
                         x => x.Id == payment.TripId, stoppingToken)
                         ?? throw new InvalidOperationException("Trip for payment event was not found.");
@@ -206,6 +219,10 @@ public sealed class TripPaymentConsumer(
                     else if (envelope.EventName == "PaymentFailed") trip.MarkPaymentPending();
                     else if (envelope.EventName == "PaymentRefunded") trip.Cancel();
                 }
+                else
+                {
+                    log.LogWarning("Unhandled event {EventName} with MessageId {MessageId}", envelope.EventName, envelope.MessageId);
+                }
 
                 db.ProcessedIntegrationMessages.Add(new ProcessedIntegrationMessage
                 {
@@ -213,22 +230,30 @@ public sealed class TripPaymentConsumer(
                 });
 
                 await db.SaveChangesAsync(stoppingToken);
-                channel.BasicAck(args.DeliveryTag, false);
+                _channel.BasicAck(args.DeliveryTag, false);
             }
             catch (Exception ex)
             {
                 log.LogError(ex, "Trip integration event failed");
-                channel.BasicNack(args.DeliveryTag, false, false);
+                _channel?.BasicNack(args.DeliveryTag, false, false);
             }
         };
 
-        channel.BasicConsume(options.Queue, false, consumer);
+        _channel.BasicConsume(options.Queue, false, consumer);
         return Task.CompletedTask;
+    }
+
+    public override void Dispose()
+    {
+        _channel?.Close();
+        _channel?.Dispose();
+        base.Dispose();
     }
 
     private sealed record Envelope(string MessageId, string EventName, string Payload);
     private sealed record DriverAssignedEvent(Guid TripId, Guid DriverId);
     private sealed record PaymentEvent(Guid PaymentId, Guid TripId, decimal Amount);
+    private sealed record PriceCalculatedEvent(Guid TripId, decimal FinalPrice);
 }
 
 public static class IntegrationRegistration
